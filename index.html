@@ -300,6 +300,12 @@ function AssetTracker() {
   // on the dashboard — carries the fetched TW market value over to the
   // 每日紀錄 form so the user can add the US-side value and confirm together.
   const [dailyPrefill, setDailyPrefill] = useState(null);
+  // Lifted out of DailyPanel itself: that panel only renders while
+  // tab === "daily", so a useState inside it gets wiped every time you
+  // switch away and back (e.g. going to 總覽 to fill market value, then to
+  // 交易紀錄 to fill cost — each visit was resetting whatever the other one
+  // had just filled in). Owning it here means it survives tab switches.
+  const [dailyForm, setDailyForm] = useState({ date: todayStr(), twValue: "", usValue: "", twCost: "", usCost: "" });
 
   const [dailyRecords, setDailyRecords] = useState([]);
   const [holdings, setHoldings] = useState([]);
@@ -308,11 +314,14 @@ function AssetTracker() {
   const [planItems, setPlanItems] = useState([]);
   const [goal, setGoal] = useState({ targetAmount: 10000000, targetYear: 2035 });
   const [planSchedule, setPlanSchedule] = useState(defaultPlanSchedule());
+  // Starting cost basis, before any trade in the 交易紀錄 log — combined
+  // with the running buy/sell total to get today's accumulated cost.
+  const [costBasis, setCostBasis] = useState({ startingCost: 0 });
 
   // ---- initial load ----
   useEffect(() => {
     (async () => {
-      const [dr, h, t, dv, p, g, ps] = await Promise.all([
+      const [dr, h, t, dv, p, g, ps, cb] = await Promise.all([
         loadKey("dailyRecords", defaultDailyRecords()),
         loadKey("holdings", defaultHoldings()),
         loadKey("trades", defaultTrades()),
@@ -320,6 +329,7 @@ function AssetTracker() {
         loadKey("planItems", defaultPlan()),
         loadKey("goal", { targetAmount: 10000000, targetYear: 2035 }),
         loadKey("planSchedule", defaultPlanSchedule()),
+        loadKey("costBasis", { startingCost: 0 }),
       ]);
       setDailyRecords(dr);
       setHoldings(h);
@@ -328,6 +338,7 @@ function AssetTracker() {
       setPlanItems(p);
       setGoal(g);
       setPlanSchedule(ps);
+      setCostBasis(cb);
       setReady(true);
     })();
   }, []);
@@ -340,6 +351,8 @@ function AssetTracker() {
   useEffect(() => { if (ready) saveKey("planItems", planItems); }, [planItems, ready]);
   useEffect(() => { if (ready) saveKey("goal", goal); }, [goal, ready]);
   useEffect(() => { if (ready) saveKey("planSchedule", planSchedule); }, [planSchedule, ready]);
+  useEffect(() => { if (ready) saveKey("costBasis", costBasis); }, [costBasis, ready]);
+
 
   // ---- full backup / restore ----
   const exportBackup = () => {
@@ -400,6 +413,8 @@ function AssetTracker() {
   const tradesInvested = trades.reduce(
     (s, t) => s + (t.action === "buy" ? t.amount : -t.amount), 0
   );
+  // Running cost basis: starting cost plus every buy (+) / sell (-) since.
+  const accumulatedCost = Number(costBasis.startingCost || 0) + tradesInvested;
   // 目前持倉成本優先取自「每日紀錄」的台股成本+美股成本
   // 沒有填成本欄位時，才退回用交易紀錄淨買入金額估算
   const latestCost = latest ? (latest.twCost || 0) + (latest.usCost || 0) : 0;
@@ -524,13 +539,17 @@ function AssetTracker() {
           />
         )}
         {tab === "daily" && (
-          <DailyPanel records={sortedDaily} setRecords={setDailyRecords} prefill={dailyPrefill} />
+          <DailyPanel records={sortedDaily} setRecords={setDailyRecords} prefill={dailyPrefill}
+            form={dailyForm} setForm={setDailyForm} />
         )}
         {tab === "holdings" && (
           <HoldingsPanel holdings={holdingsWithShares} setHoldings={setHoldings} />
         )}
         {tab === "trades" && (
-          <TradesPanel trades={trades} setTrades={setTrades} holdings={holdings} />
+          <TradesPanel trades={trades} setTrades={setTrades} holdings={holdings}
+            costBasis={costBasis} setCostBasis={setCostBasis} accumulatedCost={accumulatedCost}
+            onFillDailyCost={(value) => { setDailyPrefill({ twCost: value, nonce: Date.now() }); setTab("daily"); }}
+          />
         )}
         {tab === "dividends" && (
           <DividendsPanel dividends={dividends} setDividends={setDividends} holdings={holdings} />
@@ -893,14 +912,20 @@ function StatCard({ label, value, tone }) {
 }
 
 // ---------------- Daily Panel ----------------
-function DailyPanel({ records, setRecords, prefill }) {
-  const [form, setForm] = useState({ date: todayStr(), twValue: "", usValue: "", twCost: "", usCost: "" });
-  // When "帶入「每日紀錄」台股市值" is pressed on the dashboard, prefill
-  // is set to a fresh object each time — that reference change is what
-  // makes this effect fire again even if the same value is sent twice.
+function DailyPanel({ records, setRecords, prefill, form, setForm }) {
+  // When "帶入「每日紀錄」..." is pressed elsewhere in the app, prefill is
+  // set to a fresh object each time — that reference change is what makes
+  // this effect fire again even if the same value is sent twice. Only the
+  // fields actually present on prefill get overwritten, so the market-value
+  // button and the cost-basis button can each fill in just their own field.
   useEffect(() => {
     if (!prefill) return;
-    setForm((f) => ({ ...f, date: todayStr(), twValue: String(prefill.twValue) }));
+    setForm((f) => {
+      const next = { ...f, date: todayStr() };
+      if (prefill.twValue != null) next.twValue = String(prefill.twValue);
+      if (prefill.twCost != null) next.twCost = String(prefill.twCost);
+      return next;
+    });
   }, [prefill]);
   const add = () => {
     if (!form.twValue && !form.usValue) return;
@@ -1094,7 +1119,7 @@ function HoldingsPanel({ holdings, setHoldings }) {
 }
 
 // ---------------- Trades Panel ----------------
-function TradesPanel({ trades, setTrades, holdings }) {
+function TradesPanel({ trades, setTrades, holdings, costBasis, setCostBasis, accumulatedCost, onFillDailyCost }) {
   const [form, setForm] = useState({
     date: todayStr(), symbol: "", action: "buy", shares: "", price: "", fee: "", tax: "", note: "",
   });
@@ -1114,6 +1139,32 @@ function TradesPanel({ trades, setTrades, holdings }) {
 
   return (
     <div className="space-y-4">
+      {costBasis && (
+        <Panel title="成本追蹤">
+          <Field label="起始成本（交易紀錄開始追蹤之前，已經投入的成本）">
+            <input type="number" value={costBasis.startingCost}
+              onChange={(e) => setCostBasis({ ...costBasis, startingCost: Number(e.target.value || 0) })}
+              className="input" />
+          </Field>
+          <div className="flex justify-between items-baseline mt-3 text-sm mono">
+            <span style={{ color: COLORS.sub }}>目前累積成本（起始成本 + 全部買賣紀錄）</span>
+            <span className="font-bold" style={{ color: COLORS.gold }}>NT$ {nf(accumulatedCost)}</span>
+          </div>
+          {onFillDailyCost && (
+            <>
+              <button onClick={() => onFillDailyCost(Math.round(accumulatedCost))}
+                className="mt-3 w-full rounded-lg py-2 text-[11px] font-bold"
+                style={{ background: COLORS.bg, border: `1px solid ${COLORS.gold}`, color: COLORS.gold }}>
+                帶入「每日紀錄」台股成本
+              </button>
+              <div className="text-[10px] mt-1" style={{ color: COLORS.sub }}>
+                會跳到「每日紀錄」並自動填好今天的台股成本，確認後按「儲存紀錄」即可
+              </div>
+            </>
+          )}
+        </Panel>
+      )}
+
       <Panel title="新增交易">
         <div className="grid grid-cols-2 gap-2">
           <Field label="日期"><input type="date" value={form.date}
