@@ -73,29 +73,50 @@ async function fetchYahoo(symbol) {
   const result = data?.chart?.result?.[0];
   if (!result) throw new Error("Yahoo no result");
 
-  const closes = result.indicators?.quote?.[0]?.close || [];
-  let lastIdx = -1;
-  for (let i = closes.length - 1; i >= 0; i--) {
-    if (closes[i] != null && Number.isFinite(Number(closes[i]))) { lastIdx = i; break; }
-  }
-  if (lastIdx < 0) throw new Error("Yahoo no price");
+  const meta = result.meta || {};
 
-  let prevIdx = -1;
-  for (let i = lastIdx - 1; i >= 0; i--) {
-    if (closes[i] != null && Number.isFinite(Number(closes[i]))) { prevIdx = i; break; }
+  // Prefer meta live price + previous close (same unadjusted basis).
+  // Reconstructing from daily close[] can mix adjusted closes and inflate %.
+  let price = Number(meta.regularMarketPrice);
+  let prevClose = Number(
+    meta.regularMarketPreviousClose ?? meta.previousClose ?? meta.chartPreviousClose
+  );
+
+  // Fallback to daily close series only when meta is incomplete
+  if (!Number.isFinite(price) || !Number.isFinite(prevClose)) {
+    const closes = result.indicators?.quote?.[0]?.close || [];
+    let lastIdx = -1;
+    for (let i = closes.length - 1; i >= 0; i--) {
+      if (closes[i] != null && Number.isFinite(Number(closes[i]))) {
+        lastIdx = i;
+        break;
+      }
+    }
+    if (lastIdx < 0) throw new Error("Yahoo no price");
+
+    let prevIdx = -1;
+    for (let i = lastIdx - 1; i >= 0; i--) {
+      if (closes[i] != null && Number.isFinite(Number(closes[i]))) {
+        prevIdx = i;
+        break;
+      }
+    }
+
+    if (!Number.isFinite(price)) price = Number(closes[lastIdx]);
+    if (!Number.isFinite(prevClose)) {
+      prevClose = prevIdx >= 0 ? Number(closes[prevIdx]) : price;
+    }
   }
 
-  const price = Number(closes[lastIdx]);
-  const prevClose = prevIdx >= 0
-    ? Number(closes[prevIdx])
-    : Number(result.meta?.chartPreviousClose ?? price);
-  const ts = Array.isArray(result.timestamp) ? result.timestamp[lastIdx] : null;
+  if (!Number.isFinite(price)) throw new Error("Yahoo no price");
 
   return {
     price,
     prevClose: Number.isFinite(prevClose) ? prevClose : price,
     isStale: false,
-    asOfDate: ts ? new Date(ts * 1000).toISOString() : null,
+    asOfDate: meta.regularMarketTime
+      ? new Date(meta.regularMarketTime * 1000).toISOString()
+      : null,
     source: "Yahoo",
   };
 }
