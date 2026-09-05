@@ -1,8 +1,8 @@
 /**
- * ask.js — 4.6-ask-stable-1
+ * ask.js — 4.6-ask-free-1
  *
  * 聊天/問答功能：前端把使用者訊息 + 對話歷史 + 目前持股摘要（純文字）一起丟過來，
- * 這支 Function 組成 system prompt 呼叫 Claude API，回傳文字答案。
+ * 這支 Function 組成訊息陣列，呼叫 Cloudflare Workers AI（免費，Llama 3.1 8B），回傳文字答案。
  *
  * 用法：POST /ask
  *   body: {
@@ -12,13 +12,19 @@
  *   }
  *   回傳: { ok: true, reply: "..." }
  *
- * 需要在 Cloudflare Pages 專案的 Settings → Environment variables 設定：
- *   ANTHROPIC_API_KEY = sk-ant-xxxxxxxx（你的 Claude API 金鑰，記得選 Secret 加密）
+ * 需要在 Cloudflare Pages 專案設定 AI 綁定（不用申請外部 API 金鑰，完全免費）：
+ *   專案 → Settings → Functions → AI bindings → Add binding
+ *   Variable name: AI
+ *   （不用選 service，Workers AI 是 Cloudflare 內建的，選了就會出現）
+ *
+ * 免費額度：每帳號每天 10,000 neurons，個人使用完全夠用，超過才會計費。
+ * 模型能力提醒：Llama 3.1 8B 是輕量開源模型，中文理解/推理能力比 Claude 弱，
+ * 適合日常聊天跟簡單問答；如果之後想要更聰明的回答，可以換回付費的 Claude/GPT API。
  */
 
-const ASK_VERSION = "4.6-ask-stable-1";
-const MODEL = "claude-haiku-4-5-20251001"; // 成本低、聊天問答夠用；要換更聰明的模型可改這裡
-const MAX_HISTORY_TURNS = 8; // 只帶最近幾輪，避免每次都把整串對話都送去，浪費 token
+const ASK_VERSION = "4.6-ask-free-1";
+const MODEL = "@cf/meta/llama-3.1-8b-instruct"; // 免費模型；要換更強的可查 Workers AI 模型目錄
+const MAX_HISTORY_TURNS = 8; // 只帶最近幾輪，避免每次都把整串對話都送去
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -40,10 +46,13 @@ const SYSTEM_PROMPT_BASE = `你是內嵌在一個個人存股資產追蹤 App �
 
 export async function onRequestPost(context) {
   try {
-    const apiKey = context.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
+    const ai = context.env.AI;
+    if (!ai) {
       return jsonResponse(
-        { error: "尚未設定 ANTHROPIC_API_KEY，請到 Cloudflare Pages 專案設定裡加上這個環境變數。" },
+        {
+          error:
+            "尚未設定 AI 綁定，請到 Cloudflare Pages 專案 Settings → Functions → AI bindings 加上一個 Variable name 為 AI 的綁定。",
+        },
         500
       );
     }
@@ -68,40 +77,17 @@ export async function onRequestPost(context) {
       ? `${SYSTEM_PROMPT_BASE}\n\n目前持股資料（使用者 App 裡的即時數字）：\n${contextText}`
       : SYSTEM_PROMPT_BASE;
 
-    const messages = [...history, { role: "user", content: message }];
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...history,
+      { role: "user", content: message },
+    ];
 
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 700,
-        system: systemPrompt,
-        messages,
-      }),
-    });
+    const result = await ai.run(MODEL, { messages, max_tokens: 700 });
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      return jsonResponse(
-        { error: `Claude API 呼叫失敗（HTTP ${res.status}）`, detail: errText.slice(0, 500) },
-        502
-      );
-    }
-
-    const data = await res.json();
-    const reply = (data?.content || [])
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n")
-      .trim();
-
+    const reply = String(result?.response || "").trim();
     if (!reply) {
-      return jsonResponse({ error: "Claude 沒有回傳文字內容" }, 502);
+      return jsonResponse({ error: "AI 沒有回傳文字內容" }, 502);
     }
 
     return jsonResponse({ ok: true, version: ASK_VERSION, reply });
