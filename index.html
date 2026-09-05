@@ -79,6 +79,10 @@ const Target = LR.Target || FallbackIcon;
 const Download = LR.Download || FallbackIcon;
 const Upload = LR.Upload || FallbackIcon;
 const ShieldCheck = LR.ShieldCheck || FallbackIcon;
+const ChevronLeft = LR.ChevronLeft || FallbackIcon;
+const ChevronRight = LR.ChevronRight || FallbackIcon;
+const ExternalLink = LR.ExternalLink || FallbackIcon;
+const Newspaper = LR.Newspaper || FallbackIcon;
 
 // Drawn inline instead of pulled from the lucide-react CDN, specifically for
 // edit/delete controls — if that CDN ever fails to load, every icon above
@@ -102,7 +106,7 @@ const PencilIcon = ({ size = 15, style }) => (
 );
 
 // ---------- constants ----------
-const APP_VERSION = "4.6-family-clean-v10";
+const APP_VERSION = "4.6-personal-v2.17";
 const BACKUP_SCHEMA_VERSION = 1;
 
 const TABS = [
@@ -295,6 +299,35 @@ async function fetchQuotesWithFallback(symbols) {
   return data.quotes;
 }
 
+// ---------- news helpers (持股新聞摘要，Cloudflare Function: /news) ----------
+async function fetchStockNews(activeHoldings) {
+  if (!activeHoldings.length) return {};
+  const symbols = activeHoldings.map((h) => h.symbol).join(",");
+  const names = activeHoldings.map((h) => h.name || "").join(",");
+  const url = `/news?symbols=${encodeURIComponent(symbols)}&names=${encodeURIComponent(names)}&_ts=${Date.now()}`;
+  const res = await fetch(url, { cache: "no-store" });
+  let data = null;
+  try {
+    data = await res.json();
+  } catch (e) {
+    throw new Error(`新聞 API 回傳格式錯誤（HTTP ${res.status}）`);
+  }
+  if (!res.ok || !data?.ok) {
+    throw new Error(data?.error || `新聞 API 失敗（HTTP ${res.status}）`);
+  }
+  return data.news || {};
+}
+
+function relativeTimeLabel(iso) {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 60) return `${Math.max(1, mins)} 分鐘前`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs} 小時前`;
+  const days = Math.floor(hrs / 24);
+  return `${days} 天前`;
+}
+
 
 // ---------- storage helpers ----------
 async function loadKey(key, fallback) {
@@ -346,8 +379,80 @@ function validateBackupPayload(payload) {
 }
 
 // ---- seed data imported from user's Excel (存股現況表) ----
-// ---- 乾淨版：不內建任何個人真實資料，供家人自行輸入 ----
-const DAILY_SEED = [];
+const DAILY_SEED = [
+  { date: "2025-06-26", twValue: 3166040, usValue: 0, twCost: 2565517, usCost: 0 },
+  { date: "2025-07-25", twValue: 3195048, usValue: 0, twCost: 2664889, usCost: 0 },
+  { date: "2025-08-26", twValue: 3210265, usValue: 0, twCost: 2774652, usCost: 0 },
+  { date: "2025-09-26", twValue: 3284473, usValue: 0, twCost: 2880672, usCost: 0 },
+  { date: "2025-10-27", twValue: 3368608, usValue: 0, twCost: 2986790, usCost: 0 },
+  { date: "2025-11-26", twValue: 3262660, usValue: 0, twCost: 3089600, usCost: 0 },
+  { date: "2025-12-26", twValue: 3362990, usValue: 0, twCost: 3192293, usCost: 0 },
+  { date: "2026-01-26", twValue: 3538946, usValue: 0, twCost: 3226215, usCost: 0 },
+  { date: "2026-02-26", twValue: 3756281, usValue: 0, twCost: 3235552, usCost: 0 },
+  { date: "2026-03-16", twValue: 3618543, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-03-26", twValue: 3600657, usValue: 0, twCost: 3250251, usCost: 0 },
+  { date: "2026-04-20", twValue: 3888320, usValue: 0, twCost: 3265063, usCost: 0 },
+  { date: "2026-05-22", twValue: 4428092, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-05-25", twValue: 4646611, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-05-26", twValue: 4626800, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-05-27", twValue: 4750345, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-05-28", twValue: 4672076, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-05-29", twValue: 4810347, usValue: 0, twCost: 3342530, usCost: 0 },
+  { date: "2026-06-01", twValue: 4961475, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-02", twValue: 5055962, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-03", twValue: 5151392, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-05", twValue: 4975604, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-08", twValue: 4755334, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-09", twValue: 4938207, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-10", twValue: 4781311, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-11", twValue: 4777273, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-12", twValue: 4875398, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-15", twValue: 4970680, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-16", twValue: 4977658, usValue: 3771, twCost: 0, usCost: 0 },
+  { date: "2026-06-17", twValue: 5013265, usValue: 7444, twCost: 0, usCost: 0 },
+  { date: "2026-06-18", twValue: 5093695, usValue: 7475, twCost: 0, usCost: 0 },
+  { date: "2026-06-22", twValue: 5219138, usValue: 7475, twCost: 0, usCost: 0 },
+  { date: "2026-06-23", twValue: 5181764, usValue: 11938, twCost: 0, usCost: 0 },
+  { date: "2026-06-24", twValue: 5132783, usValue: 16242, twCost: 0, usCost: 0 },
+  { date: "2026-06-25", twValue: 5137417, usValue: 16206, twCost: 0, usCost: 0 },
+  { date: "2026-06-26", twValue: 4980721, usValue: 16300, twCost: 0, usCost: 0 },
+  { date: "2026-06-29", twValue: 5009911, usValue: 16311, twCost: 0, usCost: 0 },
+  { date: "2026-06-30", twValue: 5151725, usValue: 21225, twCost: 3403799, usCost: 0 },
+  { date: "2026-07-01", twValue: 5117489, usValue: 21463, twCost: 0, usCost: 0 },
+  { date: "2026-07-02", twValue: 5112269, usValue: 21345, twCost: 0, usCost: 0 },
+  { date: "2026-07-03", twValue: 5143370, usValue: 24984, twCost: 0, usCost: 0 },
+  { date: "2026-07-06", twValue: 5178933, usValue: 24984, twCost: 0, usCost: 0 },
+  { date: "2026-07-07", twValue: 5083060, usValue: 31067, twCost: 0, usCost: 0 },
+  { date: "2026-07-08", twValue: 5100787, usValue: 30874, twCost: 0, usCost: 0 },
+  { date: "2026-07-09", twValue: 5125553, usValue: 30892, twCost: 0, usCost: 0 },
+  { date: "2026-07-13", twValue: 5115395, usValue: 37150, twCost: 3587902, usCost: 36499 },
+  { date: "2026-07-14", twValue: 5066227, usValue: 41292, twCost: 3603620, usCost: 41125 },
+  { date: "2026-07-15", twValue: 5197934, usValue: 41561, twCost: 3615373, usCost: 41125 },
+  { date: "2026-07-16", twValue: 5178960, usValue: 43605, twCost: 3627032, usCost: 43125 },
+  { date: "2026-07-17", twValue: 4991457, usValue: 46362, twCost: 3640177, usCost: 46240 },
+  { date: "2026-07-20", twValue: 4932564, usValue: 45866, twCost: 3656141, usCost: 46250 },
+  { date: "2026-07-21", twValue: 4914623, usValue: 50468, twCost: 3657895, usCost: 51000 },
+  { date: "2026-07-22", twValue: 5052937, usValue: 51283, twCost: 3665135, usCost: 51000 },
+  { date: "2026-07-23", twValue: 5031327, usValue: 51252, twCost: 3669882, usCost: 51000 },
+  { date: "2026-07-24", twValue: 4985815, usValue: 53502, twCost: 3675925, usCost: 54125 },
+  { date: "2026-07-27", twValue: 4975929, usValue: 53445, twCost: 3684836, usCost: 54125 },
+  { date: "2026-07-28", twValue: 4818119, usValue: 58292, twCost: 3712139, usCost: 59250 },
+  { date: "2026-07-29", twValue: 4685161, usValue: 58270, twCost: 3729044, usCost: 59250 },
+  { date: "2026-07-30", twValue: 4646661, usValue: 57151, twCost: 3731030, usCost: 59250 },
+  { date: "2026-07-31", twValue: 4986167, usValue: 58658, twCost: 3733341, usCost: 59250 },
+  { date: "2026-08-03", twValue: 5011134, usValue: 58755, twCost: 3733341, usCost: 59250 },
+  { date: "2026-08-04", twValue: 5080385, usValue: 63033, twCost: 3739509, usCost: 62375 },
+  { date: "2026-08-05", twValue: 5174562, usValue: 64542, twCost: 3739509, usCost: 62375 },
+  { date: "2026-08-06", twValue: 5157649, usValue: 64030, twCost: 3739509, usCost: 62375 },
+  { date: "2026-08-07", twValue: 5141151, usValue: 63815, twCost: 3747554, usCost: 62375 },
+  { date: "2026-08-10", twValue: 5274347, usValue: 67530, twCost: 3748544, usCost: 65500 },
+  { date: "2026-08-11", twValue: 5299567, usValue: 67259, twCost: 3782584, usCost: 65500 },
+  { date: "2026-08-12", twValue: 5339625, usValue: 72282, twCost: 3782573, usCost: 70625 },
+  { date: "2026-08-13", twValue: 5375077, usValue: 72555, twCost: 3782573, usCost: 70625 },
+  { date: "2026-08-14", twValue: 5416627, usValue: 73931, twCost: 3791128, usCost: 71625 },
+  { date: "2026-08-17", twValue: 5381482, usValue: 75639, twCost: 3791319, usCost: 73333 },
+  { date: "2026-08-18", twValue: 5333972, usValue: 74959, twCost: 3792423, usCost: 73750 },
+];
 
 function AssetTracker() {
   const [ready, setReady] = useState(false);
@@ -666,7 +771,53 @@ function AssetTracker() {
     const avgCost = hasManualAvgCost ? manualAvgCost : autoAvgCost;
     const estCostBasis = avgCost != null ? Math.round(avgCost * current) : null;
 
-    return { ...h, bought, sold, current, pct, avgCost, estCostBasis, isManualAvgCost: hasManualAvgCost, avgTradePrice };
+    // 本季（自然季度：1-3月/4-6月/7-9月/10-12月）淨增加股數，過季就歸零重算。
+    const now = new Date();
+    const qStartMonth = Math.floor(now.getMonth() / 3) * 3; // 0, 3, 6, 9
+    const quarterStartStr = `${now.getFullYear()}-${String(qStartMonth + 1).padStart(2, "0")}-01`;
+    const quarterNum = qStartMonth / 3 + 1;
+    const quarterSharesAdded = symbolTrades
+      .filter((t) => t.date >= quarterStartStr)
+      .reduce((s, t) => s + (t.action === "buy" ? t.shares : -t.shares), 0);
+
+    // 今年累計（自然年：1/1 起算）淨增加股數，跨年就歸零重算。
+    const yearStartStr = `${now.getFullYear()}-01-01`;
+    const yearSharesAdded = symbolTrades
+      .filter((t) => t.date >= yearStartStr)
+      .reduce((s, t) => s + (t.action === "buy" ? t.shares : -t.shares), 0);
+
+    // 推估離目標股數還要多久：用「從第一筆交易到今天」的實際淨增加股數，
+    // 算出平均每月增加速度，再用剩餘股數 ÷ 這個速度，推算預估達成日期（精確到日）。
+    // 完全依實際交易紀錄，不是用假設報酬率或投入金額去猜。
+    let projectedLabel = null;
+    if (h.target2035 > 0) {
+      if (current >= h.target2035) {
+        projectedLabel = "已達成";
+      } else if (symbolTrades.length > 0) {
+        const firstTradeDate = new Date(symbolTrades[0].date);
+        const daysSpan = Math.max(1, (now - firstTradeDate) / 86400000);
+        const monthsSpan = Math.max(1 / 30.44, daysSpan / 30.44); // 至少抓約1天，避免除以0
+        const netFromTrades = bought - sold;
+        const monthlyPace = netFromTrades / monthsSpan;
+        if (monthlyPace > 0) {
+          const remaining = h.target2035 - current;
+          const monthsNeeded = remaining / monthlyPace;
+          const target = new Date(now.getTime() + monthsNeeded * 30.44 * 86400000);
+          const y = target.getFullYear();
+          const m = String(target.getMonth() + 1).padStart(2, "0");
+          projectedLabel = `預定 ${y}/${m}`;
+        } else {
+          projectedLabel = "無法推估";
+        }
+      } else {
+        projectedLabel = "無法推估";
+      }
+    }
+
+    return {
+      ...h, bought, sold, current, pct, avgCost, estCostBasis, isManualAvgCost: hasManualAvgCost, avgTradePrice,
+      quarterSharesAdded, quarterNum, yearSharesAdded, projectedLabel,
+    };
   }), [holdings, trades]);
 
   const planTotal = planItems.reduce((s, p) => s + Number(p.amount || 0), 0);
@@ -837,6 +988,112 @@ function Header({ goal, totalToday, goalDate }) {
           {goalDate && <span style={{ color: COLORS.gold }}>預計 {goalDate} 達成</span>}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------- News Carousel (dashboard) ----------------
+// 只顯示「今天有新消息」的持股，逐則輪播；完全沒有任何新消息時整張卡片不渲染。
+function NewsCarousel({ holdings }) {
+  const [newsList, setNewsList] = useState([]);
+  const [idx, setIdx] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const touchStartX = useRef(null);
+
+  const activeHoldings = holdings.filter((h) => Number(h.current || 0) > 0 && h.symbol);
+  const activeKey = activeHoldings.map((h) => h.symbol).sort().join(",");
+
+  const buildFlatList = (newsBySymbol) => {
+    const list = [];
+    for (const h of activeHoldings) {
+      const items = newsBySymbol[h.symbol];
+      if (!items) continue;
+      for (const it of items) list.push({ ...it, symbol: h.symbol, name: h.name });
+    }
+    return list;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      // 快取 3 小時內、且持股組合沒變就直接沿用，避免每次開 App 都重新打新聞來源。
+      const cached = await loadKey("stockNews", null);
+      const freshEnough = cached && cached.symbolsKey === activeKey &&
+        (Date.now() - new Date(cached.at).getTime()) < 3 * 3600 * 1000;
+
+      if (freshEnough) {
+        if (!cancelled) { setNewsList(buildFlatList(cached.news || {})); setIdx(0); setLoaded(true); }
+        return;
+      }
+      if (!activeHoldings.length) { if (!cancelled) setLoaded(true); return; }
+
+      try {
+        const news = await fetchStockNews(activeHoldings);
+        if (!cancelled) { setNewsList(buildFlatList(news)); setIdx(0); setLoaded(true); }
+        saveKey("stockNews", { news, at: new Date().toISOString(), symbolsKey: activeKey });
+      } catch (e) {
+        // 抓失敗就沿用舊快取（如果有的話），沒有快取就直接不顯示這張卡片。
+        if (!cancelled) { if (cached) setNewsList(buildFlatList(cached.news || {})); setLoaded(true); }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKey]);
+
+  if (!loaded || newsList.length === 0) return null;
+
+  const goTo = (i) => setIdx(((i % newsList.length) + newsList.length) % newsList.length);
+  const onTouchStart = (e) => { touchStartX.current = e.touches[0].clientX; };
+  const onTouchEnd = (e) => {
+    if (touchStartX.current == null) return;
+    const dx = e.changedTouches[0].clientX - touchStartX.current;
+    if (dx > 40) goTo(idx - 1);
+    else if (dx < -40) goTo(idx + 1);
+    touchStartX.current = null;
+  };
+
+  const item = newsList[idx];
+
+  return (
+    <div className="rounded-2xl p-4" style={{
+      background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+      boxShadow: "0 4px 16px rgba(0,0,0,0.28)",
+    }} onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-1.5 text-xs" style={{ color: COLORS.sub }}>
+          <Newspaper size={13} /> 持股新聞
+        </div>
+        {newsList.length > 1 && (
+          <div className="flex items-center gap-2">
+            <button onClick={() => goTo(idx - 1)} style={{ color: COLORS.sub }}><ChevronLeft size={16} /></button>
+            <button onClick={() => goTo(idx + 1)} style={{ color: COLORS.sub }}><ChevronRight size={16} /></button>
+          </div>
+        )}
+      </div>
+
+      <div className="text-xs font-bold mono" style={{ color: COLORS.gold }}>{item.symbol}｜{item.name}</div>
+      <div className="text-sm font-bold mt-1 leading-snug">{item.title}</div>
+      <div className="text-[11px] mt-1.5" style={{ color: COLORS.sub }}>
+        {item.source ? `${item.source} · ` : ""}{relativeTimeLabel(item.pubDate)}
+      </div>
+
+      <a href={item.link} target="_blank" rel="noreferrer"
+        className="inline-flex items-center gap-1 mt-2.5 text-xs font-bold rounded-lg px-3 py-1.5"
+        style={{ background: COLORS.gold, color: COLORS.bg }}>
+        查看新聞 <ExternalLink size={12} />
+      </a>
+
+      {newsList.length > 1 && (
+        <div className="flex justify-center gap-1.5 mt-3">
+          {newsList.map((_, i) => (
+            <div key={i} className="rounded-full" style={{
+              width: i === idx ? 14 : 6, height: 6,
+              background: i === idx ? COLORS.gold : COLORS.panelBorder,
+              transition: "width 0.2s",
+            }} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1103,6 +1360,8 @@ function Dashboard({ totalToday, dailyChange, dailyChangePct, capitalGain, total
   }, [chartData, chartRangeId]);
   return (
     <div className="space-y-4">
+      <NewsCarousel holdings={holdings} />
+
       <div className="rounded-2xl p-4" style={{
         background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
         boxShadow: "0 4px 16px rgba(0,0,0,0.28)",
@@ -1659,11 +1918,26 @@ function HoldingsPanel({ holdings, setHoldings }) {
                     <span style={{ color: COLORS.sub }}>目前 {nf(h.current)} 股</span>
                     <span style={{ color: COLORS.sub }}>目標 {nf(h.target2035)} 股</span>
                   </div>
+                  <div className="flex justify-between text-[11px] mono mt-1" style={{ color: COLORS.sub }}>
+                    <span>
+                      第 {h.quarterNum} 季增加 <span style={{ color: h.quarterSharesAdded >= 0 ? COLORS.text : COLORS.gain }}>
+                        {h.quarterSharesAdded > 0 ? "+" : ""}{nf(h.quarterSharesAdded)} 股
+                      </span>
+                    </span>
+                    <span>
+                      今年累計 <span style={{ color: h.yearSharesAdded >= 0 ? COLORS.text : COLORS.gain }}>
+                        {h.yearSharesAdded > 0 ? "+" : ""}{nf(h.yearSharesAdded)} 股
+                      </span>
+                    </span>
+                  </div>
                   <div className="mt-1 h-1.5 rounded-full overflow-hidden" style={{ background: COLORS.panelBorder }}>
                     <div className="h-full rounded-full" style={{ width: `${h.pct}%`, background: COLORS.gold }} />
                   </div>
-                  <div className="text-right text-[11px] mono mt-1" style={{ color: COLORS.gold }}>
-                    達成率 {h.pct.toFixed(1)}%
+                  <div className="flex justify-between items-baseline mt-1">
+                    <span className="text-[11px] mono" style={{ color: COLORS.sub }}>{h.projectedLabel}</span>
+                    <span className="text-[11px] mono" style={{ color: COLORS.gold }}>
+                      達成率 {h.pct.toFixed(1)}%
+                    </span>
                   </div>
                 </>
               )}
@@ -2139,32 +2413,80 @@ function TabBar({ tab, setTab }) {
 
 // ---------------- defaults (first run) ----------------
 function defaultHoldings() {
-  // 乾淨版：不內建個人持股，請自行於「持股進度」新增
-  return [];
+  return [
+    { id: uid(), symbol: "0050", name: "元大台灣50", initialShares: 3919, target2035: 42679 },
+    { id: uid(), symbol: "0056", name: "元大高股息", initialShares: 90007, target2035: 147196 },
+    { id: uid(), symbol: "006208", name: "富邦台50", initialShares: 56, target2035: 0 },
+    { id: uid(), symbol: "00685L", name: "群益台灣加權正2", initialShares: 2561, target2035: 0 },
+    { id: uid(), symbol: "009816", name: "凱基台灣TOP50", initialShares: 215, target2035: 0 },
+    { id: uid(), symbol: "00981A", name: "主動統一台股增長", initialShares: 0, target2035: 0 },
+    { id: uid(), symbol: "00991A", name: "主動復華未來50", initialShares: 512, target2035: 0 },
+    { id: uid(), symbol: "2330", name: "台積電", initialShares: 32, target2035: 0 },
+  ];
 }
 function defaultTrades() {
-  // 乾淨版：不內建個人交易紀錄，請自行於「交易紀錄」新增
-  return [];
+  return [
+    { id: uid(), date: "2026-08-04", symbol: "0056", action: "buy", shares: 49, price: 49.98, fee: 3, tax: 0, amount: 2452.02, note: "" },
+    { id: uid(), date: "2026-08-04", symbol: "0050", action: "buy", shares: 36, price: 100.6, fee: 5, tax: 0, amount: 3626.6, note: "" },
+    { id: uid(), date: "2026-08-07", symbol: "0050", action: "buy", shares: 35, price: 103.8, fee: 5, tax: 0, amount: 3638.0, note: "" },
+    { id: uid(), date: "2026-08-07", symbol: "0056", action: "buy", shares: 47, price: 51.5, fee: 3, tax: 0, amount: 2423.5, note: "" },
+    { id: uid(), date: "2026-08-07", symbol: "00981A", action: "buy", shares: 35, price: 28.27, fee: 1, tax: 0, amount: 990.45, note: "" },
+    { id: uid(), date: "2026-08-07", symbol: "00991A", action: "buy", shares: 59, price: 16.82, fee: 1, tax: 0, amount: 993.38, note: "" },
+    { id: uid(), date: "2026-08-11", symbol: "0050", action: "buy", shares: 324, price: 103.84, fee: 49, tax: 0, amount: 33693.16, note: "" },
+    { id: uid(), date: "2026-08-11", symbol: "0056", action: "buy", shares: 46, price: 52.45, fee: 3, tax: 0, amount: 2415.7, note: "" },
+    { id: uid(), date: "2026-08-14", symbol: "0050", action: "buy", shares: 34, price: 107.2, fee: 5, tax: 0, amount: 3649.8, note: "" },
+    { id: uid(), date: "2026-08-14", symbol: "0056", action: "buy", shares: 46, price: 53.7, fee: 3, tax: 0, amount: 2473.2, note: "" },
+    { id: uid(), date: "2026-08-14", symbol: "2330", action: "buy", shares: 1, price: 2430, fee: 3, tax: 0, amount: 2433, note: "" },
+    { id: uid(), date: "2026-08-17", symbol: "0050", action: "buy", shares: 1, price: 106, fee: 1, tax: 0, amount: 107, note: "" },
+    { id: uid(), date: "2026-08-18", symbol: "0050", action: "buy", shares: 46, price: 106.45, fee: 6, tax: 0, amount: 4902.7, note: "" },
+    { id: uid(), date: "2026-08-18", symbol: "0056", action: "buy", shares: 69, price: 53.1, fee: 5, tax: 0, amount: 3668.9, note: "" },
+    { id: uid(), date: "2026-08-18", symbol: "2330", action: "buy", shares: 1, price: 2395, fee: 3, tax: 0, amount: 2398, note: "" },
+    { id: uid(), date: "2026-08-18", symbol: "00991A", action: "sell", shares: 571, price: 19.5, fee: 15, tax: 11, amount: 11108.5, note: "" },
+  ];
 }
 function defaultDividends() {
-  // 乾淨版：不內建個人配息紀錄，請自行於「配息」新增
-  return [];
+  return [
+    { id: uid(), date: "2021-05-01", symbol: "00878", shares: 32000, perShare: 0.25, amount: 8000 },
+    { id: uid(), date: "2021-08-01", symbol: "00878", shares: 50000, perShare: 0.3, amount: 15000 },
+    { id: uid(), date: "2021-11-01", symbol: "00878", shares: 65000, perShare: 0.28, amount: 18200 },
+    { id: uid(), date: "2022-02-01", symbol: "00878", shares: 87000, perShare: 0.3, amount: 26100 },
+    { id: uid(), date: "2022-05-01", symbol: "00878", shares: 97000, perShare: 0.32, amount: 31040 },
+    { id: uid(), date: "2022-08-01", symbol: "00878", shares: 97000, perShare: 0.28, amount: 27160 },
+    { id: uid(), date: "2022-11-01", symbol: "00878", shares: 99000, perShare: 0.28, amount: 27720 },
+    { id: uid(), date: "2023-02-01", symbol: "00878", shares: 99000, perShare: 0.27, amount: 26730 },
+    { id: uid(), date: "2023-05-01", symbol: "00878", shares: 99000, perShare: 0.27, amount: 26730 },
+    { id: uid(), date: "2023-08-01", symbol: "00878", shares: 99000, perShare: 0.35, amount: 34650 },
+    { id: uid(), date: "2023-11-01", symbol: "00878", shares: 101000, perShare: 0.35, amount: 35350 },
+    { id: uid(), date: "2024-02-01", symbol: "00878", shares: 106000, perShare: 0.4, amount: 42400 },
+    { id: uid(), date: "2024-05-01", symbol: "00878", shares: 110000, perShare: 0.51, amount: 56100 },
+    { id: uid(), date: "2024-08-01", symbol: "00878", shares: 111000, perShare: 0.55, amount: 61050 },
+    { id: uid(), date: "2024-11-01", symbol: "00878", shares: 111000, perShare: 0.55, amount: 61050 },
+    { id: uid(), date: "2025-01-01", symbol: "0056", shares: 86000, perShare: 1.07, amount: 92020 },
+    { id: uid(), date: "2025-04-01", symbol: "0056", shares: 88350, perShare: 1.07, amount: 94534 },
+    { id: uid(), date: "2025-07-01", symbol: "0056", shares: 87944, perShare: 0.87, amount: 76511 },
+    { id: uid(), date: "2025-10-01", symbol: "0056", shares: 87595, perShare: 0.87, amount: 76208 },
+    { id: uid(), date: "2026-01-01", symbol: "0056", shares: 87595, perShare: 0.87, amount: 76208 },
+    { id: uid(), date: "2026-04-01", symbol: "0056", shares: 88062, perShare: 1, amount: 88062 },
+    { id: uid(), date: "2026-07-01", symbol: "0056", shares: 89736, perShare: 1.35, amount: 121144 },
+  ];
 }
 function defaultDailyRecords() {
   return DAILY_SEED.map((r) => ({ id: uid(), ...r }));
 }
 function defaultPlan() {
-  // 乾淨版：不內建個人定期定額配置，請自行於「計畫設定」新增
-  return [];
+  return [
+    { id: uid(), symbol: "0050", amount: 40000, note: "核心分散" },
+    { id: uid(), symbol: "0056", amount: 30000, note: "股息型，衝100張" },
+    { id: uid(), symbol: "VOO", amount: 25000, note: "標普500" },
+  ];
 }
 function defaultPlanSchedule() {
-  // 乾淨版：不內建個人資本規劃，請自行於「計畫設定」調整
   return {
-    startDate: todayStr(),
-    initialCapital: 0,
-    monthlyAmount: 0,
-    annualReturn: 8,
-    horizonMonths: 120,
+    startDate: "2025-07-01",
+    initialCapital: 2496327,
+    monthlyAmount: 95000,
+    annualReturn: 11,
+    horizonMonths: 108,
   };
 }
 
