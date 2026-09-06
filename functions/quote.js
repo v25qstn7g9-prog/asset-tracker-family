@@ -1,5 +1,5 @@
 /**
- * quote.js — 4.6-quote-stable-9
+ * quote.js — 4.6-quote-stable-10
  *
  * Stability strategy for 漲跌幅:
  * 1. TWSE `y` is preferred prevClose (matches brokers); Yahoo is final fallback only.
@@ -14,7 +14,7 @@
  */
 
 const SYMBOL_PATTERN = /^[0-9]{4,6}[A-Z]?$/;
-const QUOTE_VERSION = "4.6-quote-stable-9";
+const QUOTE_VERSION = "4.6-quote-stable-11";
 
 function isAllowedSymbol(s) {
   return SYMBOL_PATTERN.test(s);
@@ -35,6 +35,14 @@ function jsonResponse(data, status = 200) {
 function taiwanDateStr(d = new Date()) {
   const t = new Date(d.getTime() + 8 * 60 * 60 * 1000);
   return t.toISOString().slice(0, 10);
+}
+
+function isTaiwanTradingHours(d = new Date()) {
+  const t = new Date(d.getTime() + 8 * 60 * 60 * 1000);
+  const day = t.getUTCDay();
+  if (day === 0 || day === 6) return false;
+  const minutes = t.getUTCHours() * 60 + t.getUTCMinutes();
+  return minutes >= 9 * 60 && minutes <= 13 * 60 + 30;
 }
 
 async function fetchJson(url, timeoutMs = 7000) {
@@ -287,7 +295,7 @@ function taipeiDateStr(unixSeconds) {
 /**
  * Yahoo fallback.
  *
- * stable-9:
+ * stable-8:
  * Yahoo may provide BOTH price and prevClose,
  * but its prevClose is only used if TWSE and
  * today's edge cache have no prevClose.
@@ -302,81 +310,112 @@ function taipeiDateStr(unixSeconds) {
  * have enough history to do that (e.g. a very new listing).
  */
 async function fetchYahooPrice(symbol) {
-  const yahooSymbol =
-    `${symbol}.TW`;
+  const yahooSymbol = `${symbol}.TW`;
+  const encoded = encodeURIComponent(yahooSymbol);
 
-  const url =
-    `https://query1.finance.yahoo.com/v8/finance/chart/` +
-    `${encodeURIComponent(yahooSymbol)}` +
-    `?interval=1d` +
-    `&range=5d` +
-    `&_ts=${Date.now()}`;
+  // Intraday bars are required during market hours. The old stable-9 path
+  // used only interval=1d, which can remain on yesterday's close early in
+  // the session and therefore look like a "live" 0.00% quote.
+  const intradayUrl =
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encoded}` +
+    `?interval=1m&range=1d&_ts=${Date.now()}`;
 
-  const data =
-    await fetchJson(url, 6500);
+  const dailyUrl =
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encoded}` +
+    `?interval=1d&range=5d&_ts=${Date.now()}`;
 
-  const result =
-    data?.chart?.result?.[0];
-
-  if (!result) {
-    throw new Error(
-      "Yahoo no result"
-    );
-  }
-
-  const meta =
-    result.meta || {};
-
-  const timestamps = Array.isArray(result.timestamp) ? result.timestamp : [];
-  const closes = result.indicators?.quote?.[0]?.close || [];
+  const [intradayResult, dailyResult] = await Promise.allSettled([
+    fetchJson(intradayUrl, 6500),
+    fetchJson(dailyUrl, 6500),
+  ]);
 
   let price = null;
+  let priceAsOf = null;
+  let intradayFresh = false;
+
+  if (intradayResult.status === "fulfilled") {
+    const r = intradayResult.value?.chart?.result?.[0];
+    const timestamps = Array.isArray(r?.timestamp) ? r.timestamp : [];
+    const closes = r?.indicators?.quote?.[0]?.close || [];
+
+    for (let i = Math.min(timestamps.length, closes.length) - 1; i >= 0; i--) {
+      const c = Number(closes[i]);
+      if (Number.isFinite(c) && c > 0) {
+        price = c;
+        priceAsOf = new Date(Number(timestamps[i]) * 1000).toISOString();
+
+        // Consider the intraday quote fresh only if its last bar is from
+        // today's Taipei trading date. This prevents yesterday's last bar
+        // from masquerading as a current quote.
+        const today = taiwanDateStr();
+        const barDay = taipeiDateStr(Number(timestamps[i]));
+        intradayFresh = barDay === today;
+        break;
+      }
+    }
+
+    if (!Number.isFinite(price)) {
+      const metaPrice = Number(r?.meta?.regularMarketPrice);
+      if (Number.isFinite(metaPrice) && metaPrice > 0) {
+        price = metaPrice;
+      }
+    }
+  }
+
   let prevClose = null;
+  let dailyLatest = null;
 
-  if (timestamps.length && closes.length === timestamps.length) {
-    const today = taipeiDateStr(Math.floor(Date.now() / 1000));
-    let todayIdx = -1;
-    for (let i = timestamps.length - 1; i >= 0; i--) {
-      if (taipeiDateStr(timestamps[i]) === today) { todayIdx = i; break; }
+  if (dailyResult.status === "fulfilled") {
+    const r = dailyResult.value?.chart?.result?.[0];
+    const meta = r?.meta || {};
+    const timestamps = Array.isArray(r?.timestamp) ? r.timestamp : [];
+    const closes = r?.indicators?.quote?.[0]?.close || [];
+
+    const valid = [];
+    for (let i = 0; i < Math.min(timestamps.length, closes.length); i++) {
+      const c = Number(closes[i]);
+      if (Number.isFinite(c) && c > 0) {
+        valid.push({
+          day: taipeiDateStr(Number(timestamps[i])),
+          close: c,
+        });
+      }
     }
-    // If today's bar exists and has a live price, that's "today" — walk
-    // backward from it for the last COMPLETED prior day's close. If it's
-    // not there yet, the most recent bar in the array is still the last
-    // completed close, so both "current" and "previous" shift back by one.
-    const priceIdx = todayIdx >= 0 && closes[todayIdx] != null ? todayIdx : timestamps.length - 1;
-    let prevIdx = -1;
-    for (let i = priceIdx - 1; i >= 0; i--) {
-      if (closes[i] != null && Number.isFinite(Number(closes[i]))) { prevIdx = i; break; }
+
+    const today = taiwanDateStr();
+    const todayIndex = valid.findIndex((x) => x.day === today);
+
+    if (todayIndex >= 0) {
+      dailyLatest = valid[todayIndex].close;
+      if (todayIndex > 0) prevClose = valid[todayIndex - 1].close;
+    } else if (valid.length) {
+      // No daily bar for today yet: the latest completed daily bar IS the
+      // previous close, not the current live price.
+      prevClose = valid[valid.length - 1].close;
+      dailyLatest = valid[valid.length - 1].close;
     }
-    if (closes[priceIdx] != null && Number.isFinite(Number(closes[priceIdx]))) {
-      price = Number(closes[priceIdx]);
+
+    if (!Number.isFinite(prevClose) || prevClose <= 0) {
+      prevClose = Number(meta.regularMarketPreviousClose ?? meta.chartPreviousClose);
     }
-    if (prevIdx >= 0) prevClose = Number(closes[prevIdx]);
+
+    // Outside intraday availability, a completed daily close is still useful
+    // after the market has closed.
+    if (!Number.isFinite(price) && Number.isFinite(dailyLatest)) {
+      price = dailyLatest;
+    }
   }
 
-  // Fall back to meta fields only when the bars didn't yield a usable pair.
-  if (!Number.isFinite(price)) price = Number(meta.regularMarketPrice);
-  if (!Number.isFinite(prevClose) || prevClose <= 0) {
-    prevClose = Number(meta.regularMarketPreviousClose ?? meta.chartPreviousClose);
-  }
-
-  if (!Number.isFinite(price)) {
-    throw new Error(
-      "Yahoo no price"
-    );
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("Yahoo no price");
   }
 
   return {
     price,
-
-    prevClose:
-      Number.isFinite(prevClose) &&
-      prevClose > 0
-        ? prevClose
-        : null,
-
-    asOfDate: null,
+    prevClose: Number.isFinite(prevClose) && prevClose > 0 ? prevClose : null,
+    asOfDate: priceAsOf,
     source: "Yahoo",
+    intradayFresh,
   };
 }
 
@@ -699,7 +738,9 @@ export async function onRequestGet(
                 quotes[symbol]
                   .prevClose,
 
-              isStale: false,
+              isStale:
+                !yq.intradayFresh &&
+                isTaiwanTradingHours(),
 
               asOfDate:
                 yq.asOfDate,
@@ -740,6 +781,8 @@ export async function onRequestGet(
                 yahooPrev,
 
               isStale:
+                (!yq.intradayFresh &&
+                 isTaiwanTradingHours()) ||
                 !Number.isFinite(
                   yq.prevClose
                 ) ||
@@ -815,31 +858,22 @@ export async function onRequestGet(
         ),
       ];
 
+    const missing = symbols.filter((s) => !quotes[s]);
+    const complete = missing.length === 0;
+
     return jsonResponse({
       ok: true,
-
-      version:
-        QUOTE_VERSION,
-
-      source:
-        sources.join("+"),
-
-      fetchedAt:
-        new Date()
-          .toISOString(),
-
+      version: QUOTE_VERSION,
+      status: complete ? "complete" : "partial",
+      complete,
+      requestedCount: symbols.length,
+      resolvedCount: symbols.length - missing.length,
+      source: sources.join("+"),
+      fetchedAt: new Date().toISOString(),
       day,
-
       quotes,
-
-      missing:
-        symbols.filter(
-          (s) =>
-            !quotes[s]
-        ),
-
-      warnings:
-        errors,
+      missing,
+      warnings: errors,
     });
   } catch (e) {
     return jsonResponse(
