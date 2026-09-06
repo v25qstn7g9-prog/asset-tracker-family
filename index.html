@@ -112,8 +112,8 @@ const PencilIcon = ({ size = 15, style }) => (
 );
 
 // ---------- constants ----------
-const APP_VERSION = "4.6-family-clean-v10";
-const BACKUP_SCHEMA_VERSION = 1;
+const APP_VERSION = "4.6-personal-v2.19-stable";
+const BACKUP_SCHEMA_VERSION = 2;
 
 const TABS = [
   { id: "dashboard", label: "總覽", icon: Wallet },
@@ -137,12 +137,17 @@ const COLORS = {
 };
 
 const uid = () => Math.random().toString(36).slice(2, 10);
+const taiwanDateParts = (date = new Date()) => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(date);
+  const out = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  return { year: out.year, month: out.month, day: out.day, hour: Number(out.hour), minute: Number(out.minute) };
+};
 const todayStr = () => {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  const p = taiwanDateParts();
+  return `${p.year}-${p.month}-${p.day}`;
 };
 const nf = (n) => (n ?? 0).toLocaleString("zh-TW", { maximumFractionDigits: 0 });
 
@@ -245,9 +250,11 @@ function addMonths(dateStr, n) {
   return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 // build a monthly projection schedule: month 0 = start date
-function buildSchedule({ startDate, initialCapital, monthlyAmount, annualReturn, horizonMonths }) {
+function buildSchedule({ startDate, initialCapital, initialPrincipal, initialAssets, monthlyAmount, annualReturn, horizonMonths }) {
+  const principal0 = Number(initialPrincipal ?? initialCapital ?? 0);
+  const assets0 = Number(initialAssets ?? initialCapital ?? principal0);
   const rm = Math.pow(1 + (annualReturn / 100), 1 / 12) - 1;
-  const rows = [{ index: 0, principal: initialCapital, assets: initialCapital }];
+  const rows = [{ index: 0, principal: principal0, assets: assets0 }];
   for (let i = 1; i <= horizonMonths; i++) {
     const prev = rows[i - 1];
     rows.push({
@@ -265,9 +272,10 @@ function buildSchedule({ startDate, initialCapital, monthlyAmount, annualReturn,
 // so a market holiday will still count as "open" here and the auto-refresh
 // will fire a few extra times that day — harmless, just not perfectly precise.
 function isTwseTradingHours(date = new Date()) {
-  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
+  const tw = new Date(date.toLocaleString("en-US", { timeZone: "Asia/Taipei" }));
+  const day = tw.getDay(); // 0 = Sunday, 6 = Saturday
   if (day === 0 || day === 6) return false;
-  const minutes = date.getHours() * 60 + date.getMinutes();
+  const minutes = tw.getHours() * 60 + tw.getMinutes();
   return minutes >= 9 * 60 && minutes <= 13 * 60 + 30;
 }
 
@@ -288,11 +296,21 @@ function findCrossing(schedule, key, target) {
 // The front end sends the symbols that are actually held to the same-origin
 // /quote endpoint. Cloudflare then talks to TWSE/Yahoo server-side, so the
 // browser no longer needs any public CORS proxy.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchQuotesWithFallback(symbols) {
-  if (!Array.isArray(symbols) || !symbols.length) return {};
+  if (!Array.isArray(symbols) || !symbols.length) return { quotes: {}, missing: [], complete: true };
   const unique = [...new Set(symbols.map((s) => String(s).trim().toUpperCase()).filter(Boolean))];
   const url = `/quote?symbols=${encodeURIComponent(unique.join(","))}&_ts=${Date.now()}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetchWithTimeout(url, { cache: "no-store" }, 9000);
   let data = null;
   try {
     data = await res.json();
@@ -302,7 +320,13 @@ async function fetchQuotesWithFallback(symbols) {
   if (!res.ok || !data?.ok || !data?.quotes) {
     throw new Error(data?.error || `報價 API 失敗（HTTP ${res.status}）`);
   }
-  return data.quotes;
+  const missing = Array.isArray(data.missing) ? data.missing : unique.filter((sym) => !data.quotes[sym]);
+  return {
+    quotes: data.quotes,
+    missing,
+    complete: data.status === "complete" || missing.length === 0,
+    status: data.status || (missing.length ? "partial" : "complete"),
+  };
 }
 
 // ---------- news helpers (持股新聞摘要，Cloudflare Function: /news) ----------
@@ -311,7 +335,7 @@ async function fetchStockNews(activeHoldings) {
   const symbols = activeHoldings.map((h) => h.symbol).join(",");
   const names = activeHoldings.map((h) => h.name || "").join(",");
   const url = `/news?symbols=${encodeURIComponent(symbols)}&names=${encodeURIComponent(names)}&_ts=${Date.now()}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetchWithTimeout(url, { cache: "no-store" }, 10000);
   let data = null;
   try {
     data = await res.json();
@@ -350,7 +374,7 @@ function buildPortfolioContext(holdings, goal, totalToday, totalInvested, trades
     lines.push(`累積股息：NT$${nf(perf.totalDividends)}`);
     lines.push(`粗估總報酬：NT$${nf(perf.totalReturn)}，粗估報酬率：${perf.totalReturnPct.toFixed(2)}%`);
     if (perf.highPoint?.date) lines.push(`資產歷史新高：NT$${nf(perf.highPoint.value)}（${perf.highPoint.date}），目前從新高拉回：${perf.drawdown.toFixed(2)}%`);
-    lines.push(`今年以來(YTD)損益：NT$${nf(perf.ytdGain)}，YTD報酬率：${perf.ytdPct.toFixed(2)}%`);
+    lines.push(`今年資產變化(YTD)：NT$${nf(perf.ytdGain)}，YTD報酬率：${perf.ytdPct.toFixed(2)}%`);
     if (perf.startingCost) lines.push(`起始成本(計畫外的期初投入)：NT$${nf(perf.startingCost)}`);
   }
 
@@ -431,10 +455,11 @@ function buildPortfolioContext(holdings, goal, totalToday, totalInvested, trades
     }
   }
   if (planSchedule) {
-    lines.push(`\n資產成長計畫假設：起始日${planSchedule.startDate}，起始資金NT$${nf(planSchedule.initialCapital)}，` +
-      `每月投入NT$${nf(planSchedule.monthlyAmount)}，年化報酬率${planSchedule.annualReturn}%，` +
+    lines.push(`\n資產成長計畫假設：起始日${planSchedule.startDate}，起始本金NT$${nf(planSchedule.initialPrincipal ?? planSchedule.initialCapital)}，` +
+      `起始資產NT$${nf(planSchedule.initialAssets ?? planSchedule.initialCapital)}，每月投入NT$${nf(planSchedule.monthlyAmount)}，年化報酬率${planSchedule.annualReturn}%，` +
       `投影期間${planSchedule.horizonMonths}個月`);
   }
+
   return lines.join("\n");
 }
 
@@ -489,8 +514,80 @@ function validateBackupPayload(payload) {
 }
 
 // ---- seed data imported from user's Excel (存股現況表) ----
-// ---- 乾淨版：不內建任何個人真實資料，供家人自行輸入 ----
-const DAILY_SEED = [];
+const DAILY_SEED = [
+  { date: "2025-06-26", twValue: 3166040, usValue: 0, twCost: 2565517, usCost: 0 },
+  { date: "2025-07-25", twValue: 3195048, usValue: 0, twCost: 2664889, usCost: 0 },
+  { date: "2025-08-26", twValue: 3210265, usValue: 0, twCost: 2774652, usCost: 0 },
+  { date: "2025-09-26", twValue: 3284473, usValue: 0, twCost: 2880672, usCost: 0 },
+  { date: "2025-10-27", twValue: 3368608, usValue: 0, twCost: 2986790, usCost: 0 },
+  { date: "2025-11-26", twValue: 3262660, usValue: 0, twCost: 3089600, usCost: 0 },
+  { date: "2025-12-26", twValue: 3362990, usValue: 0, twCost: 3192293, usCost: 0 },
+  { date: "2026-01-26", twValue: 3538946, usValue: 0, twCost: 3226215, usCost: 0 },
+  { date: "2026-02-26", twValue: 3756281, usValue: 0, twCost: 3235552, usCost: 0 },
+  { date: "2026-03-16", twValue: 3618543, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-03-26", twValue: 3600657, usValue: 0, twCost: 3250251, usCost: 0 },
+  { date: "2026-04-20", twValue: 3888320, usValue: 0, twCost: 3265063, usCost: 0 },
+  { date: "2026-05-22", twValue: 4428092, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-05-25", twValue: 4646611, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-05-26", twValue: 4626800, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-05-27", twValue: 4750345, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-05-28", twValue: 4672076, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-05-29", twValue: 4810347, usValue: 0, twCost: 3342530, usCost: 0 },
+  { date: "2026-06-01", twValue: 4961475, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-02", twValue: 5055962, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-03", twValue: 5151392, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-05", twValue: 4975604, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-08", twValue: 4755334, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-09", twValue: 4938207, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-10", twValue: 4781311, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-11", twValue: 4777273, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-12", twValue: 4875398, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-15", twValue: 4970680, usValue: 0, twCost: 0, usCost: 0 },
+  { date: "2026-06-16", twValue: 4977658, usValue: 3771, twCost: 0, usCost: 0 },
+  { date: "2026-06-17", twValue: 5013265, usValue: 7444, twCost: 0, usCost: 0 },
+  { date: "2026-06-18", twValue: 5093695, usValue: 7475, twCost: 0, usCost: 0 },
+  { date: "2026-06-22", twValue: 5219138, usValue: 7475, twCost: 0, usCost: 0 },
+  { date: "2026-06-23", twValue: 5181764, usValue: 11938, twCost: 0, usCost: 0 },
+  { date: "2026-06-24", twValue: 5132783, usValue: 16242, twCost: 0, usCost: 0 },
+  { date: "2026-06-25", twValue: 5137417, usValue: 16206, twCost: 0, usCost: 0 },
+  { date: "2026-06-26", twValue: 4980721, usValue: 16300, twCost: 0, usCost: 0 },
+  { date: "2026-06-29", twValue: 5009911, usValue: 16311, twCost: 0, usCost: 0 },
+  { date: "2026-06-30", twValue: 5151725, usValue: 21225, twCost: 3403799, usCost: 0 },
+  { date: "2026-07-01", twValue: 5117489, usValue: 21463, twCost: 0, usCost: 0 },
+  { date: "2026-07-02", twValue: 5112269, usValue: 21345, twCost: 0, usCost: 0 },
+  { date: "2026-07-03", twValue: 5143370, usValue: 24984, twCost: 0, usCost: 0 },
+  { date: "2026-07-06", twValue: 5178933, usValue: 24984, twCost: 0, usCost: 0 },
+  { date: "2026-07-07", twValue: 5083060, usValue: 31067, twCost: 0, usCost: 0 },
+  { date: "2026-07-08", twValue: 5100787, usValue: 30874, twCost: 0, usCost: 0 },
+  { date: "2026-07-09", twValue: 5125553, usValue: 30892, twCost: 0, usCost: 0 },
+  { date: "2026-07-13", twValue: 5115395, usValue: 37150, twCost: 3587902, usCost: 36499 },
+  { date: "2026-07-14", twValue: 5066227, usValue: 41292, twCost: 3603620, usCost: 41125 },
+  { date: "2026-07-15", twValue: 5197934, usValue: 41561, twCost: 3615373, usCost: 41125 },
+  { date: "2026-07-16", twValue: 5178960, usValue: 43605, twCost: 3627032, usCost: 43125 },
+  { date: "2026-07-17", twValue: 4991457, usValue: 46362, twCost: 3640177, usCost: 46240 },
+  { date: "2026-07-20", twValue: 4932564, usValue: 45866, twCost: 3656141, usCost: 46250 },
+  { date: "2026-07-21", twValue: 4914623, usValue: 50468, twCost: 3657895, usCost: 51000 },
+  { date: "2026-07-22", twValue: 5052937, usValue: 51283, twCost: 3665135, usCost: 51000 },
+  { date: "2026-07-23", twValue: 5031327, usValue: 51252, twCost: 3669882, usCost: 51000 },
+  { date: "2026-07-24", twValue: 4985815, usValue: 53502, twCost: 3675925, usCost: 54125 },
+  { date: "2026-07-27", twValue: 4975929, usValue: 53445, twCost: 3684836, usCost: 54125 },
+  { date: "2026-07-28", twValue: 4818119, usValue: 58292, twCost: 3712139, usCost: 59250 },
+  { date: "2026-07-29", twValue: 4685161, usValue: 58270, twCost: 3729044, usCost: 59250 },
+  { date: "2026-07-30", twValue: 4646661, usValue: 57151, twCost: 3731030, usCost: 59250 },
+  { date: "2026-07-31", twValue: 4986167, usValue: 58658, twCost: 3733341, usCost: 59250 },
+  { date: "2026-08-03", twValue: 5011134, usValue: 58755, twCost: 3733341, usCost: 59250 },
+  { date: "2026-08-04", twValue: 5080385, usValue: 63033, twCost: 3739509, usCost: 62375 },
+  { date: "2026-08-05", twValue: 5174562, usValue: 64542, twCost: 3739509, usCost: 62375 },
+  { date: "2026-08-06", twValue: 5157649, usValue: 64030, twCost: 3739509, usCost: 62375 },
+  { date: "2026-08-07", twValue: 5141151, usValue: 63815, twCost: 3747554, usCost: 62375 },
+  { date: "2026-08-10", twValue: 5274347, usValue: 67530, twCost: 3748544, usCost: 65500 },
+  { date: "2026-08-11", twValue: 5299567, usValue: 67259, twCost: 3782584, usCost: 65500 },
+  { date: "2026-08-12", twValue: 5339625, usValue: 72282, twCost: 3782573, usCost: 70625 },
+  { date: "2026-08-13", twValue: 5375077, usValue: 72555, twCost: 3782573, usCost: 70625 },
+  { date: "2026-08-14", twValue: 5416627, usValue: 73931, twCost: 3791128, usCost: 71625 },
+  { date: "2026-08-17", twValue: 5381482, usValue: 75639, twCost: 3791319, usCost: 73333 },
+  { date: "2026-08-18", twValue: 5333972, usValue: 74959, twCost: 3792423, usCost: 73750 },
+];
 
 function AssetTracker() {
   const [ready, setReady] = useState(false);
@@ -537,8 +634,14 @@ function AssetTracker() {
       setDividends(dv);
       setPlanItems(p);
       setGoal(g);
-      setPlanSchedule(ps);
-      setCostBasis(cb);
+      const defaultPs = defaultPlanSchedule();
+      setPlanSchedule({
+        ...defaultPs,
+        ...ps,
+        initialPrincipal: Number(ps?.initialPrincipal ?? ps?.initialCapital ?? defaultPs.initialPrincipal),
+        initialAssets: Number(ps?.initialAssets ?? ps?.initialCapital ?? defaultPs.initialAssets),
+      });
+      setCostBasis(isObject(cb) ? { ...{ startingCost: 0 }, ...cb } : { startingCost: 0 });
       setReady(true);
     })();
   }, []);
@@ -561,7 +664,7 @@ function AssetTracker() {
       appVersion: APP_VERSION,
       schemaVersion: BACKUP_SCHEMA_VERSION,
       exportedAt: new Date().toISOString(),
-      data: { dailyRecords, holdings, trades, dividends, planItems, goal, planSchedule },
+      data: { dailyRecords, holdings, trades, dividends, planItems, goal, planSchedule, costBasis },
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -695,8 +798,17 @@ function AssetTracker() {
       setDividends(data.dividends);
       setPlanItems(data.planItems);
       setGoal(data.goal);
-      setPlanSchedule(data.planSchedule);
-      window.alert("備份已匯入完成。建議重新整理一次頁面確認資料。");
+      const defaultPs = defaultPlanSchedule();
+      const importedPs = data.planSchedule || {};
+      setPlanSchedule({
+        ...defaultPs,
+        ...importedPs,
+        initialPrincipal: Number(importedPs.initialPrincipal ?? importedPs.initialCapital ?? defaultPs.initialPrincipal),
+        initialAssets: Number(importedPs.initialAssets ?? importedPs.initialCapital ?? defaultPs.initialAssets),
+      });
+      // schema 1 沒有 costBasis；保留目前值，不用 0 覆蓋。schema 2 才完整還原。
+      if (payload.schemaVersion >= 2 && isObject(data.costBasis)) setCostBasis(data.costBasis);
+      window.alert(`備份已匯入完成（schema ${payload.schemaVersion || 1}）。建議重新整理一次頁面確認資料。`);
     } catch (e) {
       console.error("backup import failed", e);
       window.alert("備份檔讀取失敗，資料未變更。");
@@ -741,7 +853,7 @@ function AssetTracker() {
     total: r.twValue + r.usValue,
   }));
 
-  // "今年以來(YTD)" — market-value change since the start of the current
+  // "今年資產變化(YTD)" — market-value change since the start of the current
   // calendar year. Like the other stat cards, this is value-based, not a
   // cost-adjusted/time-weighted return: it doesn't separate new
   // contributions from investment gains. Baseline is the last record on or
@@ -825,7 +937,7 @@ function AssetTracker() {
       .reduce((s, t) => s + (t.action === "buy" ? t.shares : -t.shares), 0);
 
     // 推估離目標股數還要多久：用「從第一筆交易到今天」的實際淨增加股數，
-    // 算出平均每月增加速度，再用剩餘股數 ÷ 這個速度，推算預估達成日期。
+    // 算出平均每月增加速度，再用剩餘股數 ÷ 這個速度，推算預估達成日期（精確到日）。
     // 完全依實際交易紀錄，不是用假設報酬率或投入金額去猜。
     let projectedLabel = null;
     if (h.target2035 > 0) {
@@ -1219,20 +1331,23 @@ function LivePricePanel({ holdings, onFillDailyTw }) {
     isFetchingRef.current = true;
     setLiveStatus("loading");
     const symbols = targets.map((h) => h.symbol);
+    let quoteResult = null;
     let quotes = null;
     try {
       try {
-        quotes = await fetchQuotesWithFallback(symbols);
+        quoteResult = await fetchQuotesWithFallback(symbols);
+        quotes = quoteResult.quotes;
       } catch (e) {
         // One retry after a short pause — a brief TWSE/API hiccup
         // shouldn't fail the whole refresh.
         await new Promise((res) => setTimeout(res, 800));
-        quotes = await fetchQuotesWithFallback(symbols);
+        quoteResult = await fetchQuotesWithFallback(symbols);
+        quotes = quoteResult.quotes;
       }
     } catch (e) {
       quotes = null;
     }
-    const failed = symbols.filter((s) => !quotes || !quotes[s]);
+    const failed = quoteResult?.missing || symbols.filter((s) => !quotes || !quotes[s]);
     const now = new Date();
     // Merge this refresh with the last known successful price for any
     // symbol that failed this round. This keeps the dashboard useful during
@@ -1295,10 +1410,18 @@ function LivePricePanel({ holdings, onFillDailyTw }) {
 
   const totalValue = rows.reduce((s, r) => s + r.value, 0);
   const hasLive = rows.length > 0;
+  const quoteComplete = activeHoldings.length > 0
+    && rows.length === activeHoldings.length
+    && failedSymbols.length === 0
+    && rows.every((r) => Number.isFinite(r.price) && r.price > 0 && !r.isFromCache);
   const staleOne = Object.values(live).find((l) => l.isStale && l.asOfDate);
 
   const recordToday = () => {
     if (!onFillDailyTw) return;
+    if (!quoteComplete) {
+      window.alert("目前報價只有部分成功或混有快取價格，為避免把不完整市值寫進每日紀錄，請先重新抓到全部持股報價。");
+      return;
+    }
     onFillDailyTw(Math.round(totalValue));
   };
 
@@ -1356,18 +1479,20 @@ function LivePricePanel({ holdings, onFillDailyTw }) {
             ))}
           </div>
           <div className="flex justify-between text-xs mono pt-2 mt-2 font-bold" style={{ borderTop: `1px solid ${COLORS.panelBorder}` }}>
-            <span style={{ color: COLORS.sub }}>全部股票總市值</span>
+            <span style={{ color: COLORS.sub }}>{quoteComplete ? "全部股票總市值" : "目前可得市值（部分）"}</span>
             <span style={{ color: COLORS.gold }}>NT$ {nf(totalValue)}</span>
           </div>
           {onFillDailyTw && (
             <>
-              <button onClick={recordToday}
+              <button onClick={recordToday} disabled={!quoteComplete}
                 className="mt-2 w-full rounded-lg py-2 text-[11px] font-bold"
-                style={{ background: COLORS.bg, border: `1px solid ${COLORS.gold}`, color: COLORS.gold }}>
+                style={{ background: COLORS.bg, border: `1px solid ${quoteComplete ? COLORS.gold : COLORS.panelBorder}`, color: quoteComplete ? COLORS.gold : COLORS.sub, opacity: quoteComplete ? 1 : 0.6 }}>
                 帶入「每日紀錄」台股市值
               </button>
               <div className="text-[10px] mt-1" style={{ color: COLORS.sub }}>
-                會跳到「每日紀錄」並自動填好台股市值，美股記得手動補上再儲存
+                {quoteComplete
+                  ? "會跳到「每日紀錄」並自動填好台股市值，美股記得手動補上再儲存"
+                  : "目前報價不完整：已禁止把部分市值寫入每日紀錄"}
               </div>
             </>
           )}
@@ -1485,7 +1610,7 @@ function Dashboard({ totalToday, dailyChange, dailyChangePct, capitalGain, total
         <StatCard label="累積股息" value={`NT$ ${nf(totalDividends)}`} tone="gold" />
         <StatCard label="粗估總報酬" value={`NT$ ${nf(totalReturn)}`} tone={totalReturn >= 0 ? "gain" : "loss"} />
         <StatCard label="粗估報酬率" value={pf(totalReturnPct)} tone={totalReturnPct >= 0 ? "gain" : "loss"} />
-        <StatCard label="今年以來(YTD)" value={`${nf(ytdGain)}（${pf(ytdPct)}）`} tone={ytdGain >= 0 ? "gain" : "loss"} className="col-span-2" />
+        <StatCard label="今年資產變化(YTD)" value={`${nf(ytdGain)}（${pf(ytdPct)}）`} tone={ytdGain >= 0 ? "gain" : "loss"} className="col-span-2" />
       </div>
       <div className="text-[11px] px-1" style={{ color: COLORS.sub }}>
         註：目前成本來自券商/每日紀錄的持倉成本；若曾賣出、換股或用股息再投入，
@@ -1538,19 +1663,26 @@ function DailyPanel({ records, setRecords, prefill, form, setForm }) {
     });
   }, [prefill]);
   const add = () => {
-    if (!form.twValue && !form.usValue) return;
+    const sameDayExists = records.some((x) => x.date === form.date);
+    if (!sameDayExists && !form.twValue && !form.usValue) return;
+    if (!form.twValue && !form.usValue && !form.twCost && !form.usCost) return;
     setRecords((r) => {
+      const existing = r.find((x) => x.date === form.date);
+      const keepOrNumber = (raw, key) => raw === "" || raw == null
+        ? Number(existing?.[key] || 0)
+        : Number(raw);
       const filtered = r.filter((x) => x.date !== form.date);
       return [...filtered, {
-        id: uid(), date: form.date,
-        twValue: Number(form.twValue || 0), usValue: Number(form.usValue || 0),
-        twCost: Number(form.twCost || 0), usCost: Number(form.usCost || 0),
-      }];
+        id: existing?.id || uid(), date: form.date,
+        twValue: keepOrNumber(form.twValue, "twValue"), usValue: keepOrNumber(form.usValue, "usValue"),
+        twCost: keepOrNumber(form.twCost, "twCost"), usCost: keepOrNumber(form.usCost, "usCost"),
+      }].sort((a, b) => a.date.localeCompare(b.date));
     });
     setForm({ date: todayStr(), twValue: "", usValue: "", twCost: "", usCost: "" });
   };
   const remove = (id) => setRecords((r) => r.filter((x) => x.id !== id));
-  const reversed = [...records].reverse();
+  const sortedRecords = [...records].sort((a, b) => a.date.localeCompare(b.date));
+  const reversed = [...sortedRecords].reverse();
 
   // Monthly summary: for each month, compare the last record of that month
   // against the last record before it (i.e. the prior month's closing
@@ -1560,7 +1692,7 @@ function DailyPanel({ records, setRecords, prefill, form, setForm }) {
   const monthlyStats = {};
   const monthKey = (d) => d.slice(0, 7); // "YYYY-MM"
   let lastSeenPerMonth = {};
-  records.forEach((r) => { lastSeenPerMonth[monthKey(r.date)] = r; });
+  sortedRecords.forEach((r) => { lastSeenPerMonth[monthKey(r.date)] = r; });
   const monthKeys = Object.keys(lastSeenPerMonth).sort();
   monthKeys.forEach((mk, i) => {
     const endRec = lastSeenPerMonth[mk];
@@ -2434,8 +2566,11 @@ function ProgressPanel({ planSchedule, setPlanSchedule, planTotal, schedule, tot
           <Field label="計畫開始日"><input type="date" value={planSchedule.startDate}
             onChange={(e) => setPlanSchedule({ ...planSchedule, startDate: e.target.value })}
             className="input" /></Field>
-          <Field label="起始本金"><input type="number" value={planSchedule.initialCapital}
-            onChange={(e) => setPlanSchedule({ ...planSchedule, initialCapital: Number(e.target.value) })}
+          <Field label="起始本金"><input type="number" value={planSchedule.initialPrincipal ?? planSchedule.initialCapital}
+            onChange={(e) => setPlanSchedule({ ...planSchedule, initialPrincipal: Number(e.target.value), initialCapital: Number(e.target.value) })}
+            className="input" /></Field>
+          <Field label="起始資產"><input type="number" value={planSchedule.initialAssets ?? planSchedule.initialCapital}
+            onChange={(e) => setPlanSchedule({ ...planSchedule, initialAssets: Number(e.target.value) })}
             className="input" /></Field>
           <Field label="每月投入金額">
             <input type="number" value={planSchedule.monthlyAmount}
@@ -2785,7 +2920,6 @@ function executeReadTool(tc, { trades, dailyRecords, dividends, holdings }) {
   return `不支援的 source：${a.source}`;
 }
 
-
 function AiChatWidget({ holdings, goal, totalToday, totalInvested, trades, setTrades, setHoldings, setGoal, dailyRecords, dividends, planItems, planSchedule, goalDate, perf }) {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState([]); // {role, content} 一般訊息，或 {role:'assistant', toolCall, status} 確認卡片
@@ -2799,12 +2933,19 @@ function AiChatWidget({ holdings, goal, totalToday, totalInvested, trades, setTr
   }, [messages, open]);
 
   // 呼叫一次 /ask，回傳解析後的資料；共用給第一次發問跟「自動查詢後再問一次」用。
-  const askOnce = async (message, history, context) => {
-    const res = await fetch("/ask", {
+  // toolTurns（選填）：之前每一輪「AI 呼叫了什麼工具＋查到的結果」，用正式的
+  // assistant/tool 訊息格式接回對話，讓模型判斷「工具已經回覆過了」，不要再塞成文字。
+  const askOnce = async (message, history, context, toolTurns) => {
+    const deviceIdKey = "stockTrackerDeviceId";
+    let deviceId = localStorage.getItem(deviceIdKey);
+    if (!deviceId) { deviceId = `d_${uid()}_${uid()}`; localStorage.setItem(deviceIdKey, deviceId); }
+    const body = { message, history, context };
+    if (Array.isArray(toolTurns) && toolTurns.length > 0) body.toolTurns = toolTurns;
+    const res = await fetchWithTimeout("/ask", {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message, history, context }),
-    });
+      headers: { "content-type": "application/json", "x-device-id": deviceId },
+      body: JSON.stringify(body),
+    }, 20000);
     const data = await res.json().catch(() => null);
     if (!res.ok || !data?.ok) {
       throw new Error(data?.error || `問答失敗（HTTP ${res.status}）`);
@@ -2828,15 +2969,26 @@ function AiChatWidget({ holdings, goal, totalToday, totalInvested, trades, setTr
 
       let data = await askOnce(text, history, baseContext);
 
-      // 如果 AI 呼叫的是唯讀查詢工具，直接自動執行、把查到的資料補進 context 再幫它問一次，
-      // 使用者完全不用介入；最多自動追問一輪，避免萬一 AI 一直要求查詢造成無限迴圈。
+      // 如果 AI 呼叫的是唯讀查詢工具，直接自動執行、把查到的結果用正式的 tool 訊息
+      // 接回對話再幫它問一次，使用者完全不用介入；最多自動追問一輪，避免萬一 AI 一直
+      // 要求查詢造成無限迴圈。toolTurns 會依序累積每一輪的呼叫+結果，一起送給 /ask。
       let rounds = 0;
-      while (Array.isArray(data.toolCalls) && data.toolCalls.every((tc) => READ_TOOL_NAMES.includes(tc.name)) && rounds < 2) {
-        const fetched = data.toolCalls
-          .map((tc) => `【查詢結果：${tc.name}(${JSON.stringify(tc.arguments)})】\n${executeReadTool(tc, { trades, dailyRecords, dividends, holdings })}`)
-          .join("\n\n");
-        const augmentedContext = `${baseContext}\n\n以下是你剛剛主動查詢到的額外資料，直接拿來回答，不要再重複查詢同樣的東西：\n${fetched}`;
-        data = await askOnce(text, history, augmentedContext);
+      const toolTurns = [];
+      const seenReadCalls = new Set();
+      while (Array.isArray(data.toolCalls) && data.toolCalls.length > 0 && data.toolCalls.every((tc) => READ_TOOL_NAMES.includes(tc.name)) && rounds < 2) {
+        const freshCalls = data.toolCalls.filter((tc) => {
+          const key = `${tc.name}:${JSON.stringify(tc.arguments || {})}`;
+          if (seenReadCalls.has(key)) return false;
+          seenReadCalls.add(key);
+          return true;
+        });
+        if (!freshCalls.length) break;
+        const results = freshCalls.map((tc) => ({
+          id: tc.id,
+          content: executeReadTool(tc, { trades, dailyRecords, dividends, holdings }),
+        }));
+        toolTurns.push({ calls: freshCalls, results });
+        data = await askOnce(text, history, baseContext, toolTurns);
         rounds += 1;
       }
 
@@ -2849,7 +3001,7 @@ function AiChatWidget({ holdings, goal, totalToday, totalInvested, trades, setTr
             ...actionCalls.map((tc) => ({ role: "assistant", toolCall: tc, status: "pending" })),
           ]);
         } else {
-          setMessages((m) => [...m, { role: "assistant", content: "這個問題需要的資料範圍比較大，麻煩換個更具體的問法（例如指定股票代號或縮小時間範圍）。" }]);
+          setMessages((m) => [...m, { role: "assistant", content: "AI 已取得查詢資料，但仍未完成回答。請直接重送同一個問題；不需要縮小日期範圍。" }]);
         }
       } else {
         setMessages((m) => [...m, { role: "assistant", content: data.reply }]);
@@ -3077,31 +3229,82 @@ function TabBar({ tab, setTab }) {
 
 // ---------------- defaults (first run) ----------------
 function defaultHoldings() {
-  // 乾淨版：不內建個人持股，請自行於「持股進度」新增
-  return [];
+  return [
+    { id: uid(), symbol: "0050", name: "元大台灣50", initialShares: 3919, target2035: 42679 },
+    { id: uid(), symbol: "0056", name: "元大高股息", initialShares: 90007, target2035: 147196 },
+    { id: uid(), symbol: "006208", name: "富邦台50", initialShares: 56, target2035: 0 },
+    { id: uid(), symbol: "00685L", name: "群益台灣加權正2", initialShares: 2561, target2035: 0 },
+    { id: uid(), symbol: "009816", name: "凱基台灣TOP50", initialShares: 215, target2035: 0 },
+    { id: uid(), symbol: "00981A", name: "主動統一台股增長", initialShares: 0, target2035: 0 },
+    { id: uid(), symbol: "00991A", name: "主動復華未來50", initialShares: 512, target2035: 0 },
+    { id: uid(), symbol: "2330", name: "台積電", initialShares: 32, target2035: 0 },
+  ];
 }
 function defaultTrades() {
-  // 乾淨版：不內建個人交易紀錄，請自行於「交易紀錄」新增
-  return [];
+  return [
+    { id: uid(), date: "2026-08-04", symbol: "0056", action: "buy", shares: 49, price: 49.98, fee: 3, tax: 0, amount: 2452.02, note: "" },
+    { id: uid(), date: "2026-08-04", symbol: "0050", action: "buy", shares: 36, price: 100.6, fee: 5, tax: 0, amount: 3626.6, note: "" },
+    { id: uid(), date: "2026-08-07", symbol: "0050", action: "buy", shares: 35, price: 103.8, fee: 5, tax: 0, amount: 3638.0, note: "" },
+    { id: uid(), date: "2026-08-07", symbol: "0056", action: "buy", shares: 47, price: 51.5, fee: 3, tax: 0, amount: 2423.5, note: "" },
+    { id: uid(), date: "2026-08-07", symbol: "00981A", action: "buy", shares: 35, price: 28.27, fee: 1, tax: 0, amount: 990.45, note: "" },
+    { id: uid(), date: "2026-08-07", symbol: "00991A", action: "buy", shares: 59, price: 16.82, fee: 1, tax: 0, amount: 993.38, note: "" },
+    { id: uid(), date: "2026-08-11", symbol: "0050", action: "buy", shares: 324, price: 103.84, fee: 49, tax: 0, amount: 33693.16, note: "" },
+    { id: uid(), date: "2026-08-11", symbol: "0056", action: "buy", shares: 46, price: 52.45, fee: 3, tax: 0, amount: 2415.7, note: "" },
+    { id: uid(), date: "2026-08-14", symbol: "0050", action: "buy", shares: 34, price: 107.2, fee: 5, tax: 0, amount: 3649.8, note: "" },
+    { id: uid(), date: "2026-08-14", symbol: "0056", action: "buy", shares: 46, price: 53.7, fee: 3, tax: 0, amount: 2473.2, note: "" },
+    { id: uid(), date: "2026-08-14", symbol: "2330", action: "buy", shares: 1, price: 2430, fee: 3, tax: 0, amount: 2433, note: "" },
+    { id: uid(), date: "2026-08-17", symbol: "0050", action: "buy", shares: 1, price: 106, fee: 1, tax: 0, amount: 107, note: "" },
+    { id: uid(), date: "2026-08-18", symbol: "0050", action: "buy", shares: 46, price: 106.45, fee: 6, tax: 0, amount: 4902.7, note: "" },
+    { id: uid(), date: "2026-08-18", symbol: "0056", action: "buy", shares: 69, price: 53.1, fee: 5, tax: 0, amount: 3668.9, note: "" },
+    { id: uid(), date: "2026-08-18", symbol: "2330", action: "buy", shares: 1, price: 2395, fee: 3, tax: 0, amount: 2398, note: "" },
+    { id: uid(), date: "2026-08-18", symbol: "00991A", action: "sell", shares: 571, price: 19.5, fee: 15, tax: 11, amount: 11108.5, note: "" },
+  ];
 }
 function defaultDividends() {
-  // 乾淨版：不內建個人配息紀錄，請自行於「配息」新增
-  return [];
+  return [
+    { id: uid(), date: "2021-05-01", symbol: "00878", shares: 32000, perShare: 0.25, amount: 8000 },
+    { id: uid(), date: "2021-08-01", symbol: "00878", shares: 50000, perShare: 0.3, amount: 15000 },
+    { id: uid(), date: "2021-11-01", symbol: "00878", shares: 65000, perShare: 0.28, amount: 18200 },
+    { id: uid(), date: "2022-02-01", symbol: "00878", shares: 87000, perShare: 0.3, amount: 26100 },
+    { id: uid(), date: "2022-05-01", symbol: "00878", shares: 97000, perShare: 0.32, amount: 31040 },
+    { id: uid(), date: "2022-08-01", symbol: "00878", shares: 97000, perShare: 0.28, amount: 27160 },
+    { id: uid(), date: "2022-11-01", symbol: "00878", shares: 99000, perShare: 0.28, amount: 27720 },
+    { id: uid(), date: "2023-02-01", symbol: "00878", shares: 99000, perShare: 0.27, amount: 26730 },
+    { id: uid(), date: "2023-05-01", symbol: "00878", shares: 99000, perShare: 0.27, amount: 26730 },
+    { id: uid(), date: "2023-08-01", symbol: "00878", shares: 99000, perShare: 0.35, amount: 34650 },
+    { id: uid(), date: "2023-11-01", symbol: "00878", shares: 101000, perShare: 0.35, amount: 35350 },
+    { id: uid(), date: "2024-02-01", symbol: "00878", shares: 106000, perShare: 0.4, amount: 42400 },
+    { id: uid(), date: "2024-05-01", symbol: "00878", shares: 110000, perShare: 0.51, amount: 56100 },
+    { id: uid(), date: "2024-08-01", symbol: "00878", shares: 111000, perShare: 0.55, amount: 61050 },
+    { id: uid(), date: "2024-11-01", symbol: "00878", shares: 111000, perShare: 0.55, amount: 61050 },
+    { id: uid(), date: "2025-01-01", symbol: "0056", shares: 86000, perShare: 1.07, amount: 92020 },
+    { id: uid(), date: "2025-04-01", symbol: "0056", shares: 88350, perShare: 1.07, amount: 94534 },
+    { id: uid(), date: "2025-07-01", symbol: "0056", shares: 87944, perShare: 0.87, amount: 76511 },
+    { id: uid(), date: "2025-10-01", symbol: "0056", shares: 87595, perShare: 0.87, amount: 76208 },
+    { id: uid(), date: "2026-01-01", symbol: "0056", shares: 87595, perShare: 0.87, amount: 76208 },
+    { id: uid(), date: "2026-04-01", symbol: "0056", shares: 88062, perShare: 1, amount: 88062 },
+    { id: uid(), date: "2026-07-01", symbol: "0056", shares: 89736, perShare: 1.35, amount: 121144 },
+  ];
 }
 function defaultDailyRecords() {
   return DAILY_SEED.map((r) => ({ id: uid(), ...r }));
 }
 function defaultPlan() {
-  // 乾淨版：不內建個人定期定額配置，請自行於「計畫設定」新增
-  return [];
+  return [
+    { id: uid(), symbol: "0050", amount: 40000, note: "核心分散" },
+    { id: uid(), symbol: "0056", amount: 30000, note: "股息型，衝100張" },
+    { id: uid(), symbol: "VOO", amount: 25000, note: "標普500" },
+  ];
 }
 function defaultPlanSchedule() {
-  // 乾淨版：不內建個人資本規劃，請自行於「計畫設定」調整
   return {
-    startDate: todayStr(),
-    initialCapital: 0,
-    monthlyAmount: 0,
-    annualReturn: 8,
+    startDate: "2025-07-01",
+    initialPrincipal: 2496327,
+    initialAssets: 2720996,
+    // 舊版相容欄位：schema 1 仍可能只有 initialCapital。
+    initialCapital: 2496327,
+    monthlyAmount: 95000,
+    annualReturn: 11,
     horizonMonths: 120,
   };
 }
