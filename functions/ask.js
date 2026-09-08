@@ -12,7 +12,12 @@
  * Cloudflare Pages → Settings → Functions → AI bindings → Variable name: AI
  */
 const ASK_VERSION = "4.6-ask-free-17.0-gptoss120b";
-const MODEL = "@cf/openai/gpt-oss-120b";
+// 從 120b 換成同系列的 20b：一樣支援 function calling、訊息格式完全相容，不用改其他程式碼。
+// 20b 運算量小很多，回應通常比較快，換算下來單次問答用掉的神經元也比較少，
+// 同樣的免費額度可以撐比較多次問答；代價是複雜推理/長篇分析的品質可能略遜於 120b，
+// 但日常查詢、聊天、簡單工具呼叫這些場景差異不大。想換回大模型把這行改回
+// "@cf/openai/gpt-oss-120b" 即可。
+const MODEL = "@cf/openai/gpt-oss-20b";
 const MAX_HISTORY_TURNS = 6; // 再縮一點省輸入 token
 const MAX_MESSAGE_LEN = 2000;
 const MAX_HISTORY_CONTENT = 3000;
